@@ -1,14 +1,14 @@
 from django.shortcuts import render,redirect
+from django.http import StreamingHttpResponse
 from django.contrib.auth import authenticate,login,logout
 from django.contrib import messages
 from .forms import CreateUserForm
 from django.contrib.auth.decorators import login_required
 from face_recognition_system.settings import BASE_DIR
 from .models import student_profile,student_attendance
-from django.views import View
 from django.core.mail import EmailMessage
 from django.conf import settings
-from .decorators import unauthenticated_user,allowed_users,admin_only
+from .decorators import allowed_users
 import os
 import cv2
 from PIL import Image
@@ -17,6 +17,8 @@ import pandas as pd
 import time
 import datetime
 import csv
+
+
 
 @login_required(login_url='login')
 @allowed_users(allowed_roles=['teacher','admin'])
@@ -89,69 +91,71 @@ def getImagesAndLabels(path):
         cv2.waitKey(10)   
     return faces,Ids
 
-@login_required(login_url='login')
-@allowed_users(allowed_roles=['teacher','admin'])
-def TrackImages(request):
-    recognizer = cv2.face.LBPHFaceRecognizer_create()#cv2.createLBPHFaceRecognizer()
+def video_feed(request):
+    return StreamingHttpResponse(get_video_stream(request), content_type='multipart/x-mixed-replace; boundary=frame')
+
+
+def get_video_stream(request):
+    recognizer = cv2.face.LBPHFaceRecognizer_create()
     recognizer.read(BASE_DIR+'/algorithms/TrainingImageLabel/Trainner.yml')
     harcascadePath = "algorithms/haarcascade_frontalface_default.xml"
-    faceCascade = cv2.CascadeClassifier(harcascadePath);    
-    df=pd.read_csv(BASE_DIR+"/StudentDetails/StudentDetails.csv")
+    faceCascade = cv2.CascadeClassifier(harcascadePath)   
+    df = pd.read_csv(BASE_DIR + "/StudentDetails/StudentDetails.csv")
     cam = cv2.VideoCapture(0)
     font = cv2.FONT_HERSHEY_SIMPLEX        
-    col_names =  ['Id','Name','Date','Time']
-    attendance = pd.DataFrame(columns = col_names)   
-    minW = 0.1*cam.get(3)
-    minH = 0.1*cam.get(4) 
+    col_names = ['Id', 'Name', 'Date', 'Time']
+    attendance = pd.DataFrame(columns=col_names)   
+    minW = 0.1 * cam.get(3)
+    minH = 0.1 * cam.get(4)
+    saved_data = False  # Flag untuk menandakan apakah data sudah disimpan atau belum
+
     while True:
-        ret, im =cam.read()
-        gray=cv2.cvtColor(im,cv2.COLOR_BGR2GRAY)
-        faces = faceCascade.detectMultiScale( 
-                gray,
-                scaleFactor = 1.2,
-                minNeighbors = 5,
-                minSize = (int(minW), int(minH)),
-        )    
-        for(x,y,w,h) in faces:
-            cv2.rectangle(im,(x,y),(x+w,y+h),(225,0,0),2)
-            Id, conf = recognizer.predict(gray[y:y+h,x:x+w])                                   
-            if(conf < 100):
+        ret, im = cam.read()
+        gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+        faces = faceCascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(int(minW), int(minH)))
+        
+        for (x, y, w, h) in faces:
+            cv2.rectangle(im, (x, y), (x+w, y+h), (225, 0, 0), 2)
+            Id, conf = recognizer.predict(gray[y:y+h, x:x+w])
+            
+            if conf < 100:
                 ts = time.time()      
                 date = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
                 timeStamp = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S')
-                aa=df.loc[df['Id'] == Id]['Name'].values
-                name=(" ".join(aa))
-                tt=str(Id)+"-"+aa
-                attendance.loc[len(attendance)] = [Id,name,date,timeStamp]
-                student=student_profile.objects.get(student_id=Id)
-                data=student_attendance.objects.create(roll=student,name=name,date=date,time=timeStamp)
-                data.save()
-                user=student_profile.objects.filter(student_id=Id).update(attendance='Present')
-                if user:
-                    messages.success(request, 'Attendance Saved For ' + str(Id))
-                    cam.release()
-                    cv2.destroyAllWindows()
-                return redirect('/profile/'+ str(Id))
+                aa = df.loc[df['Id'] == Id]['Name'].values[0]
+                name = aa  # Menggunakan aa langsung sebagai nilai name tanpa metode join()
+                tt = str(int(Id)) + "-" + aa
+                
+                if not saved_data:  # Simpan data hanya jika belum disimpan sebelumnya
+                    attendance.loc[len(attendance)] = [Id, name, date, timeStamp]
+                    student = student_profile.objects.get(student_id=Id)
+                    data = student_attendance.objects.create(roll=student, name=name, date=date, time=timeStamp)
+                    data.save()
+                    user = student_profile.objects.filter(student_id=Id).update(attendance='Present')
+                    saved_data = True  # Set flag ke True setelah data disimpan
+
+                    
             else:
-                Id='Unknown'                
-                tt=str(Id)  
-            if(conf > 75):
-                noOfFile=len(BASE_DIR+("ImagesUnknown"))+1
-                cv2.imwrite("ImagesUnknown/Image"+str(noOfFile) + ".jpg", im[y:y+h,x:x+w])            
-            cv2.putText(im,str(tt),(x,y+h), font, 1,(255,255,255),2)        
-        attendance=attendance.drop_duplicates(subset=['Id'],keep='first')    
-        cv2.imshow('im',im) 
-        if (cv2.waitKey(1)==ord('q')):
-            break
-    ts = time.time()  
-    date = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
-    timeStamp = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S')
-    Hour,Minute,Second=timeStamp.split(":")
-    fileName="Attendance/Attendance_"+date+"_"+Hour+"-"+Minute+"-"+Second+".csv"
-    attendance.to_csv(fileName,index=False)
-    cam.release()
-    cv2.destroyAllWindows()
-    return redirect('home')
+                Id = 'Unknown'                
+                tt = str(Id)  
+            
+            if conf > 75:
+                noOfFile = len(BASE_DIR + ("ImagesUnknown")) + 1
+                cv2.imwrite("ImagesUnknown/Image" + str(noOfFile) + ".jpg", im[y:y+h, x:x+w])            
+            cv2.putText(im, str(tt), (x, y+h), font, 1, (255, 255, 255), 2)        
+        
+        attendance = attendance.drop_duplicates(subset=['Id'], keep='first')    
+        ret, frame = cv2.imencode('.jpg', im)
+        frame = frame.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame +
+               b'\r\n')
+        
+        
+
+def TrackImages(request):
+    return redirect(request, 'dashboard.html')
+    
 
 def addStudent(request):
     if request.method=='POST':
@@ -168,7 +172,6 @@ def addStudent(request):
             return redirect('home')
         else:
             return messages.success(request,'Internal Server Error')
-        return render(request,'face_rec/add_student.html')
     return render(request, 'face_rec/add_student.html')
 
 def registerPage(request):
@@ -188,9 +191,12 @@ def loginPage(request):
         username=request.POST.get('username','')
         password=request.POST.get('password','')
         user=authenticate(request,username=username,password=password)
-        if user is not None:
+        if user is not None and user.is_staff:
             login(request,user)
             return redirect('home')
+        elif user is not None and user.is_active:
+            login(request, user)
+            return redirect('student')
         else:
             messages.info(request,'Username Or Password is Incorrect')
     context={}
@@ -206,18 +212,22 @@ def deleteStudent(request,pk):
     context={'student':student}
     return render(request,'face_rec/delete.html',context)
 
-# @unauthenticated_user
-# @login_required(login_url='login')
-@allowed_users(allowed_roles=['teacher','admin'])
+def index(request):
+    return render(request,'studentpage/index.html')
+
+@login_required(login_url='login')
 def home(request):
-    return render(request,'face_rec/dashboard.html')
+    if request.user.is_staff:
+        return render(request,'face_rec/dashboard.html')
+    else:
+        return render(request, 'studentpage/dashboard.html')
 
 def logoutUser(request):
     logout(request)
     return redirect('login')
 
 @login_required(login_url='login')
-@allowed_users(allowed_roles=['teacher','admin','student'])
+@allowed_users(allowed_roles=['teacher','admin','user'])
 def profile(request,pk):
     id = int(pk)
     request.FILES
@@ -234,7 +244,8 @@ def profile(request,pk):
             messages.success(request, 'Account was Updated For ' + name)
         else:
             return messages.success(request,'Internal Server Error')
-        return render(request,'face_rec/student_profile.html')
+        render(request,'face_rec/student_profile.html')
+        
     student=student_profile.objects.filter(student_id=id)
     attendance=student_attendance.objects.filter(roll=id)
     present=student_attendance.objects.filter(roll=pk).count()
@@ -243,7 +254,7 @@ def profile(request,pk):
     return render(request,'face_rec/student_profile.html',context)
 
 @login_required(login_url='login')
-@allowed_users(allowed_roles=['teacher','admin'])
+# @allowed_users(allowed_roles=['teacher','admin'])
 def all_students(request):
     student=student_profile.objects.all()
     total_students_absent=student_profile.objects.filter(attendance='Absent').count()
@@ -251,31 +262,94 @@ def all_students(request):
     total_students=student_profile.objects.count()
     context={'student':student,'total_students':total_students,'total_students_present':total_students_present,'total_students_absent':total_students_absent}
     return render(request,'face_rec/total.html',context)
-
+    
 def about(request):
     return render(request,'face_rec/about.html')
    
 @login_required(login_url='login')
-@allowed_users(allowed_roles=['teacher','admin'])
+# @allowed_users(allowed_roles=['teacher','admin'])
 def absent_students(request):
     student=student_profile.objects.filter(attendance='Absent').all()
     total_students_absent=student_profile.objects.filter(attendance='Absent').count()
     total_students_present=student_profile.objects.filter(attendance='Present').count()
     total_students=student_profile.objects.count()
     context={'student':student,'total_students':total_students,'total_students_present':total_students_present,'total_students_absent':total_students_absent}
+    
     return render(request,'face_rec/total.html',context)
-
+    
 @login_required(login_url='login')
 @allowed_users(allowed_roles=['teacher','admin'])
 def report(request):
-    student=student_profile.objects.all()
-    total_students_present=student_profile.objects.filter(attendance='Present').count()
-    total_students=student_profile.objects.count()
+    
+    students = student_profile.objects.all()
+    attendance_data = student_attendance.objects.all()
+    total_students_present = student_profile.objects.filter(attendance='Present').count()
+    total_students = student_profile.objects.count()
     ts = time.time()  
     date = datetime.datetime.fromtimestamp(ts).strftime('%Y-%M-%d')
     timeStamp = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S')
-    context={'student':student,'total_students':total_students,'total_students_present':total_students_present,'date':date,'time':timeStamp}
-    return render(request,'face_rec/report.html',context)  
+    selected_date = request.GET.get('date')  # Retrieve the selected date from the query parameters
+    
+    filtered_data = student_attendance.objects.filter(date=selected_date)  # Filter the data based on the selected date
+    # Combine attendance data with student data
+    combined_data = []
+    for attendance in attendance_data:
+        for student in students:
+            if attendance.roll_id == student.student_id:
+                combined_data.append({
+                    'roll': attendance.roll_id,
+                    'name': student.name,
+                    'date': attendance.date,
+                    'time': attendance.time,
+                    'attendance': student.attendance
+                })
+    
+    context = {
+        'data': combined_data,
+        'total_students': total_students,
+        'total_students_present': total_students_present,
+        'date': date,
+        'time': timeStamp,
+        'filtered_data': filtered_data
+    }
+    
+    return render(request, 'face_rec/report.html', context)
+
+@login_required(login_url='login')
+def present(request):
+    students = student_profile.objects.all()
+    attendance_data = student_attendance.objects.all()
+    total_students_present = student_profile.objects.filter(attendance='Present').count()
+    total_students = student_profile.objects.count()
+    ts = time.time()  
+    date = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')  # Mengubah format tanggal
+    timeStamp = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S')
+    
+    filtered_data = student_attendance.objects.filter(date=date)  # Filter data berdasarkan tanggal hari ini
+    # Menggabungkan data kehadiran dengan data mahasiswa
+    combined_data = []
+    for attendance in attendance_data:
+        for student in students:
+            if attendance.roll_id == student.student_id:
+                combined_data.append({
+                    'roll': attendance.roll_id,
+                    'name': student.name,
+                    'date': attendance.date,
+                    'time': attendance.time,
+                    'attendance': student.attendance
+                })
+    
+    context = {
+        'data': combined_data,
+        'total_students': total_students,
+        'total_students_present': total_students_present,
+        'date': date,
+        'time': timeStamp,
+        'filtered_data': filtered_data
+    }
+    
+    return render(request,'studentpage/presensi.html',context)
+  
 
 @login_required(login_url='login')
 @allowed_users(allowed_roles=['teacher','admin'])
